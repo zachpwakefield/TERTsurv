@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.pyc
+.env/
+env/
+.venv/
+*.egg-info/
+
+# R
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code / code-server
+.vscode/
+*.code-workspace
+
+# Large / raw data
+*.bam
+*.bai
+*.vcf
+*.vcf.gz
+*.fastq
+*.fastq.gz
+*.bed
+*.bed.gz
+*.sam
+*.cram
+*.gz
+*.tar
+*.zip
+
+# Cluster / scratch outputs
+scratch/
+outMessages/
+runs/
+run_summaries/
+*.log
+*.err
+*.out
+
+# local / large data
+AS_long_joined.csv
+AS_long_joined.parquet
+TCGA_TERT_SNP_IDs.xlsx
+tert_data.csv
+
+any_snp/
+output/
+pattern_combo/
+per_snp/
+summary_plots/
+
+# Jupyter noise
+.ipynb_checkpoints/
+significant_cox_and_km_hits.csv
+

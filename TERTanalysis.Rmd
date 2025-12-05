@@ -1,0 +1,54 @@
+---
+title: "TERT"
+output: html_document
+date: "2025-08-15"
+---
+
+```{r setup, include=FALSE}
+library(data.table)
+
+# directory
+dir <- "/projectnb2/evolution/zwakefield/tcga/metadata/tcga_data/"
+
+# list csv files matching the event types
+files <- list.files(dir, pattern = "^(a3ss|a5ss|afe|ale||mxe|ri|se)\\.csv$", full.names = TRUE)
+
+# search target gene
+target <- "ENSG00000164362"
+
+# read and filter
+matches <- lapply(files, function(f) {
+  dt <- fread(f, nThread = 8)
+  keep <- grepl(target, dt[[1]])
+  dt[keep]
+})
+
+# name the list elements by file base names (without .csv)
+names(matches) <- sub("\\.csv$", "", basename(files))
+
+# optional: keep only non-empty matches
+matches <- matches[sapply(matches, nrow) > 0]
+
+matches_names <- lapply(1:length(names(matches)), function(x) {
+  matches[[x]]$V1 <- paste0(matches[[x]]$V1, ';', names(matches)[x])
+  matches[[x]]
+})
+
+all_cols <- unique(unlist(lapply(matches_names, names)))
+
+# reorder columns consistently (V1 first)
+all_cols <- c("V1", setdiff(all_cols, "V1"))
+
+# align each table to same column order
+matches_aligned <- lapply(matches_names, function(dt) {
+  missing_cols <- setdiff(all_cols, names(dt))
+  for (mc in missing_cols) dt[[mc]] <- NA
+  dt <- dt[, ..all_cols]
+  dt
+})
+
+# rbind all together
+merged <- rbindlist(matches_aligned, fill = TRUE, use.names = TRUE)
+m.df <- data.frame(merged)
+fwrite(m.df, '/projectnb2/evolution/zwakefield/tcga/TERTsnp_yunwei/tert_data.csv')
+```
