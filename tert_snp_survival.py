@@ -9,6 +9,8 @@ from pathlib import Path
 from lifelines.plotting import add_at_risk_counts
 import matplotlib as mpl
 
+from lifelines.exceptions import ConvergenceError
+
 mpl.rcParams.update({
     "pdf.fonttype": 42,     # TrueType fonts in PDFs (not Type 3 outlines)
     "ps.fonttype": 42,
@@ -25,10 +27,11 @@ warnings.filterwarnings("ignore", message="Calling float on a single element")
 
 # ────────────────────────── paths & constants ──────────────────────────
 OUTROOT   = Path("/projectnb/evolution/zwakefield/tcga/TERTsnp_yunwei")
-SNP_XLSX  = OUTROOT / "TCGA_TERT_SNP_IDs.xlsx"
+# SNP_XLSX  = OUTROOT / "TCGA_TERT_SNP_IDs.xlsx"
+SNP_XLSX  = OUTROOT / "tert_data_12_8.tsv"
 CLIN_CSV  = "/projectnb2/evolution/zwakefield/tcga/sir_analysis/harmonized/clinical_harmonized_numeric.csv"
-MIN_PER_GROUP = 7
-MIN_PER_CANCER = 7t
+MIN_PER_GROUP = 6
+MIN_PER_CANCER = 6
 FIG_EXT = ".svg"
 covars_init = ["gender", "race", "age_at_diagnosis"]#, "stage_code"]
 
@@ -105,13 +108,74 @@ def cox_survival_plot(
     plt.close(fig)
 
 
-def cox_summary(df, t, e, exposure, adjust, *, strata=None, out_tsv):
-    X = pd.get_dummies(df[[exposure] + adjust], drop_first=True)
+# def cox_summary(df, t, e, exposure, adjust, *, strata=None, out_tsv):
+#     X = pd.get_dummies(df[[exposure] + adjust], drop_first=True)
+#     if strata is not None:
+#         X[strata] = df[strata]
+#     cph = CoxPHFitter(penalizer=0.01)
+#     cph.fit(pd.concat([df[[t, e]], X], axis=1),
+#             duration_col=t, event_col=e, strata=strata, robust=True)
+#     cph.summary.to_csv(out_tsv, sep="\t")
+#     return cph.concordance_index_, cph
+
+def cox_summary(df, t_col, e_col, exposure, adjust, *, strata=None, out_tsv):
+    """
+    df      : DataFrame with all variables
+    t_col   : name of time column in df (e.g. 'OS.time')
+    e_col   : name of event column in df (e.g. 'OS.event')
+    exposure: main variable of interest (string; can be categorical)
+    adjust  : list of covariate names (numeric or categorical)
+    strata  : column name or None
+    out_tsv : path for summary output
+    """
+    # 1. Build covariate design matrix from raw df
+    covars = [exposure] + list(adjust)
+    X = df[covars].copy()
+
+    # One-hot encode categoricals (drop first level)
+    X = pd.get_dummies(X, drop_first=True)
+
+    # 2. If strata is used, bring it in *before* any row filtering
     if strata is not None:
         X[strata] = df[strata]
-    cph = CoxPHFitter(penalizer=0.01)
-    cph.fit(pd.concat([df[[t, e]], X], axis=1),
-            duration_col=t, event_col=e, strata=strata, robust=True)
+
+    # 3. Combine with survival columns, aligned on index
+    df_fit = pd.concat([df[[t_col, e_col]], X], axis=1)
+
+    # 4. Replace inf with NaN and drop any rows with missing/NaN
+    df_fit = df_fit.replace([np.inf, -np.inf], np.nan).dropna(axis=0, how="any")
+
+    # 5. Drop constant columns (zero variance) except time/event
+    nunique = df_fit.nunique(dropna=True)
+    const_cols = nunique[nunique <= 1].index.tolist()
+    const_cols = [c for c in const_cols if c not in (t_col, e_col)]
+    if const_cols:
+        print(f"[cox_summary] Dropping constant covariates: {const_cols}")
+        df_fit = df_fit.drop(columns=const_cols)
+
+    # 6. Quick sanity checks: at least one event; at least one covariate
+    if df_fit[e_col].sum() == 0:
+        print("[cox_summary] No events in this subset – skipping Cox fit.")
+        return np.nan, None
+    if df_fit.shape[1] <= 2:  # only time + event
+        print("[cox_summary] No usable covariates after filtering – skipping Cox fit.")
+        return np.nan, None
+
+    # 7. Fit Cox model with slightly stronger ridge regularization
+    cph = CoxPHFitter(penalizer=0.1)  # stronger than 0.01
+
+    try:
+        cph.fit(
+            df_fit,
+            duration_col=t_col,
+            event_col=e_col,
+            strata=strata,
+            robust=True,
+        )
+    except ConvergenceError as err:
+        print("[cox_summary] ConvergenceError:", err)
+        return np.nan, None
+
     cph.summary.to_csv(out_tsv, sep="\t")
     return cph.concordance_index_, cph
 
@@ -314,11 +378,17 @@ def informative_strata_mask(df: pd.DataFrame, snp_col: str) -> pd.Series:
 def main():
     print("Reading clinical and SNP tables …")
     clin = pd.read_csv(CLIN_CSV)
-    snps = pd.read_excel(SNP_XLSX)
+    snps = pd.read_csv(SNP_XLSX, sep='\t')
+    snps = snps[snps['indiv_has_wgs'] == True]
+    # snp_cols = [c for c in snps.columns if "chr5" in c.lower()]
+    # snp_cols = [c for c in snp_cols if snps[c].sum() > 10]
+
     clin   = clin[clin["Sample.Type"] != "Solid Tissue Normal"]
     df   = clin.merge(snps, left_on="File.ID", right_on="run_id", how="inner")
     df["race"] = df["race"].replace({"Asian":"Other", "Black":"Other", "is_missing":"Other"})
-    snp_cols = [c for c in df.columns if c.startswith("chr5:")]
+    snp_cols = [c for c in df.columns if "chr5" in c.lower()]
+    snp_cols = [c for c in snp_cols if snps[c].sum() > 10]
+    # print(snp_cols)
     print(f"Found {len(snp_cols)} SNP flag columns:", ", ".join(snp_cols))
 
     for snp in snp_cols:
@@ -435,7 +505,7 @@ def main():
         linecolor="lightgrey",
         cbar_kws=dict(label="#TRUE samples"),
         square=False,
-        annot=True, fmt="d"
+        annot=True, fmt=".0f"
     )
     plt.ylabel("SNP (last row = None/absent)")
     plt.xlabel("Cancer type")
