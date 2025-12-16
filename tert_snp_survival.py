@@ -4,7 +4,7 @@ tert_snp_survival.py  – Survival analysis for TERT promoter SNPs
 Outputs: /projectnb/evolution/zwakefield/tcga/TERTsnp_yunwei/
 """
 
-import os, sys
+import os, re, sys
 from pathlib import Path
 from lifelines.plotting import add_at_risk_counts
 import matplotlib as mpl
@@ -30,8 +30,8 @@ OUTROOT   = Path("/projectnb/evolution/zwakefield/tcga/TERTsnp_yunwei")
 # SNP_XLSX  = OUTROOT / "TCGA_TERT_SNP_IDs.xlsx"
 SNP_XLSX  = OUTROOT / "tert_data_12_8.tsv"
 CLIN_CSV  = "/projectnb2/evolution/zwakefield/tcga/sir_analysis/harmonized/clinical_harmonized_numeric.csv"
-MIN_PER_GROUP = 6
-MIN_PER_CANCER = 6
+MIN_PER_GROUP = 5
+MIN_PER_CANCER = 5
 FIG_EXT = ".svg"
 covars_init = ["gender", "race", "age_at_diagnosis"]#, "stage_code"]
 
@@ -49,30 +49,61 @@ def logrank_p(df, t, e, g):
         lr = statistics.multivariate_logrank_test(df[t], df[g], df[e])
     return lr.test_statistic, lr.p_value
 
-def km_plot(df, t, e, g, title, png):
-    kmf = KaplanMeierFitter(); sns.set_style("whitegrid"); sns.set_context("talk", 0.8)
-    fig, ax = plt.subplots(figsize=(6,4))
-    # for grp, sub in df.groupby(g, observed=True, sort=False):
-    #     kmf.fit(sub[t], sub[e], label=str(grp))
-    #     kmf.plot_survival_function(ax=ax, ci_show=True)
+# def km_plot(df, t, e, g, title, png):
+#     kmf = KaplanMeierFitter(); sns.set_style("whitegrid"); sns.set_context("talk", 0.8)
+#     fig, ax = plt.subplots(figsize=(6,4))
+#     # for grp, sub in df.groupby(g, observed=True, sort=False):
+#     #     kmf.fit(sub[t], sub[e], label=str(grp))
+#     #     kmf.plot_survival_function(ax=ax, ci_show=True)
 
-    kmfs = []  # keep the fitted KM objects for the risk table
-    for grp, sub in df.groupby(g, observed=True, sort=False):
-        kmf = KaplanMeierFitter()
-        kmf.fit(sub[t], sub[e], label=str(grp))
+#     kmfs = []  # keep the fitted KM objects for the risk table
+#     for grp, sub in df.groupby(g, observed=True, sort=False):
+#         kmf = KaplanMeierFitter()
+#         kmf.fit(sub[t], sub[e], label=str(grp))
+#         kmf.plot_survival_function(ax=ax, ci_show=True)
+#         kmfs.append(kmf)
+
+#     # one call, after plotting, with all fitted KM objects
+#     add_at_risk_counts(*kmfs, ax=ax)
+#     # add_at_risk_counts(kmf, ax=ax)
+#     _, p = logrank_p(df, t, e, g)
+#     ax.text(0.98, 0.04, f"log-rank p = {p:.3g}", transform=ax.transAxes,
+#             ha="right", va="bottom", fontsize=10,
+#             bbox=dict(facecolor="white", alpha=0.7, lw=0))
+#     ax.set_xlabel("Time (days)"); ax.set_ylabel("Survival probability")
+#     ax.set_title(title); ax.legend(title=g, frameon=False)
+#     fig.tight_layout(); fig.savefig(png.with_suffix(FIG_EXT), dpi=120); plt.close(fig)
+
+def km_plot(df, t, e, group_col, title, out_stem):
+    import matplotlib.pyplot as plt
+    from lifelines import KaplanMeierFitter
+
+    fig, ax = plt.subplots(figsize=(7.5, 5.5))
+
+    kmf = KaplanMeierFitter()
+    for name, sub in df.groupby(group_col, observed=True):
+        kmf.fit(sub[t], sub[e], label=str(name))
         kmf.plot_survival_function(ax=ax, ci_show=True)
-        kmfs.append(kmf)
 
-    # one call, after plotting, with all fitted KM objects
-    add_at_risk_counts(*kmfs, ax=ax)
-    # add_at_risk_counts(kmf, ax=ax)
-    _, p = logrank_p(df, t, e, g)
-    ax.text(0.98, 0.04, f"log-rank p = {p:.3g}", transform=ax.transAxes,
-            ha="right", va="bottom", fontsize=10,
-            bbox=dict(facecolor="white", alpha=0.7, lw=0))
-    ax.set_xlabel("Time (days)"); ax.set_ylabel("Survival probability")
-    ax.set_title(title); ax.legend(title=g, frameon=False)
-    fig.tight_layout(); fig.savefig(png.with_suffix(FIG_EXT), dpi=120); plt.close(fig)
+    ax.set_xlabel("Time (days)")
+    ax.set_ylabel("Survival probability")
+    ax.set_title(title)
+
+    # Put legend outside on the right
+    ax.legend(
+        title=group_col,
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        frameon=False,
+    )
+
+    fig.tight_layout()
+
+    # Critical: bbox_inches="tight" so the SVG includes the legend area
+    fig.savefig(out_stem.with_suffix(".svg"), dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+
 
 def cox_survival_plot(
     cph: CoxPHFitter,
@@ -162,7 +193,7 @@ def cox_summary(df, t_col, e_col, exposure, adjust, *, strata=None, out_tsv):
         return np.nan, None
 
     # 7. Fit Cox model with slightly stronger ridge regularization
-    cph = CoxPHFitter(penalizer=0.1)  # stronger than 0.01
+    cph = CoxPHFitter(penalizer=0.01)  # stronger than 0.01
 
     try:
         cph.fit(
@@ -179,61 +210,105 @@ def cox_summary(df, t_col, e_col, exposure, adjust, *, strata=None, out_tsv):
     cph.summary.to_csv(out_tsv, sep="\t")
     return cph.concordance_index_, cph
 
+
 def cox_cancer_interaction(
     df          : pd.DataFrame,
     t           : str,
     e           : str,
-    snp_flag    : str,          # column with 0/1
-    base_covars : list[str],    # the usual gender / race / age …
+    group_col   : str,          # e.g. "group" with levels TRUE/FALSE
+    base_covars : list[str],    # gender / race / age / ...
     out_tsv     : Path,
-    penalizer   : float = 0.05, # a bit more ridge for many dummies
+    penalizer   : float = 0.05,
 ):
     """
     Cancer type is treated like any other categorical covariate and every
-    dummy is interacted with the SNP flag.
+    dummy for cancer.type is interacted with the group dummy (e.g. group_TRUE).
 
-    Returns the fitted CoxPHFitter (or None if convergence fails).
+    group_col should be the same variable you used in the simple models
+    (e.g. 'group' with values 'TRUE'/'FALSE').
     """
+    THRESH_N_POS = 5
     df = df.copy()
 
-    # 1. one-hot cancer.type  (reference level dropped automatically)
-    df = pd.get_dummies(df, columns=["cancer.type"], drop_first=True)
+    # Make sure group_col is string/categorical
+    df[group_col] = df[group_col].astype(str)
+
+    df["cancer.type"] = df["cancer.type"].astype(str)
+
+    tab = (
+        df.groupby("cancer.type")[group_col]
+          .value_counts()
+          .unstack(fill_value=0)      # columns: "TRUE", "FALSE" (if present)
+    )
+
+    # default reference if nothing satisfies thresholds
+    ref_cancer = tab.index[0]
+
+    if {"TRUE", "FALSE"} <= set(tab.columns):
+        # require at least THRESH_N_POS in TRUE and FALSE
+        mask_ok = (tab["TRUE"] >= THRESH_N_POS) & (tab["FALSE"] >= THRESH_N_POS)
+        if mask_ok.any():
+            # among those, choose the one with largest total N
+            ref_cancer = (
+                tab.loc[mask_ok, ["TRUE", "FALSE"]]
+                   .sum(axis=1)
+                   .idxmax()
+            )
+
+    # make that cancer the first level → dummy baseline
+    cats = [ref_cancer] + [c for c in tab.index if c != ref_cancer]
+    df["cancer.type"] = pd.Categorical(df["cancer.type"],
+                                       categories=cats,
+                                       ordered=True)
+
+
+    # 1. One-hot encode cancer.type and group (drop reference levels)
+    df = pd.get_dummies(df, columns=["cancer.type", group_col], drop_first=True)
+
+    # 2. Identify dummy columns
     cancer_dummies = [c for c in df.columns if c.startswith("cancer.type_")]
 
-    # 2. make sure the SNP flag is numeric 0/1
-    df["SNP_FLAG"] = df[snp_flag].astype(int)
+    group_dummies = [c for c in df.columns if c.startswith(f"{group_col}_")]
+    if len(group_dummies) != 1:
+        print(f"[cox_cancer_interaction] Expected 1 dummy for {group_col}, found {group_dummies}")
+        return None
+    g_dummy = group_dummies[0]   # e.g. "group_TRUE"
 
-    THRESH_N_SNP_POS = 3
     
-    # 3. interaction columns
+
+    # 3. Interaction columns: cancer_dummy × group_dummy
     inter_cols = []
     for cd in cancer_dummies:
-        n_pos = (df[cd] & df["SNP_FLAG"]).sum()    # #samples in that cancer + SNP=1
-        if n_pos < THRESH_N_SNP_POS:
-            print(f"  · skip {cd}:SNP_FLAG  (only {n_pos} SNP-positive)")
+        # #samples in that cancer AND group=TRUE
+        n_pos = (df[cd] * df[g_dummy]).sum()
+        if n_pos < THRESH_N_POS:
+            print(f"  · skip {cd}:{g_dummy}  (only {int(n_pos)} in group=TRUE)")
             continue
-        cname = f"{cd}:SNP_FLAG"
-        prod  = df[cd] * df["SNP_FLAG"]
-        if prod.var() == 0:            # drop zero-variance terms
+        cname = f"{cd}:{g_dummy}"
+        prod  = df[cd] * df[g_dummy]
+        if prod.var() == 0:
             continue
         df[cname] = prod
         inter_cols.append(cname)
 
-    # 4. final design matrix
+    # 4. Final design matrix
     design = (
-        ["SNP_FLAG"]
-        + cancer_dummies
-        + inter_cols
-        + base_covars           # continuous or to-be-dummied later
+        [g_dummy]           # main group effect (TRUE vs FALSE)
+        + cancer_dummies    # cancer main effects (vs reference cancer)
+        + inter_cols        # cancer × group TRUE interactions
+        + base_covars       # continuous / other covariates (will be dummied)
     )
+
     X = pd.get_dummies(df[design], drop_first=True)
 
-    # 5. fit
+    # 5. Fit Cox model
     cph = CoxPHFitter(penalizer=penalizer)
     try:
         cph.fit(
             pd.concat([df[[t, e]], X], axis=1),
-            duration_col=t, event_col=e, robust=True
+            duration_col=t,
+            event_col=e,
+            robust=True,
         )
     except Exception as err:
         print(f"[WARN] interaction model failed: {err}")
@@ -242,119 +317,347 @@ def cox_cancer_interaction(
     cph.summary.to_csv(out_tsv, sep="\t")
     return cph
 
-def forest_plot(
-    cox_tsv: Path,
-    out_stem: Path,
-    title: str,
-    annotate: bool = True,
-    star: bool = True,
-    exposure_prefix: tuple[str, ...] = ("group", "PAT_LABEL", "SNP_PATTERN", "Any_SNP"),
-):
-    """
-    Draw a forest plot from a lifelines Cox summary.
 
-    • Blue rows = exposures of interest   (label starts with exposure_prefix)
-    • Grey rows = adjustment covariates   (e.g. gender, race)
-    • log-scale x-axis centred on HR = 1
-    • Optional annotation: “HR  (p=…)” + significance stars
-    """
-    import matplotlib.pyplot as plt
-    import numpy as np
-    import pandas as pd
+# def cox_cancer_interaction(
+#     df          : pd.DataFrame,
+#     t           : str,
+#     e           : str,
+#     snp_flag    : str,          # column with 0/1
+#     base_covars : list[str],    # the usual gender / race / age …
+#     out_tsv     : Path,
+#     penalizer   : float = 0.05, # a bit more ridge for many dummies
+# ):
+#     """
+#     Cancer type is treated like any other categorical covariate and every
+#     dummy is interacted with the SNP flag.
 
-    summ = pd.read_csv(cox_tsv, sep="\t", index_col=0)
-    if summ.empty:
-        return
+#     Returns the fitted CoxPHFitter (or None if convergence fails).
+#     """
+#     df = df.copy()
 
-    # keep order as in table
-    hr   = summ["exp(coef)"]
-    lo   = summ["exp(coef) lower 95%"]
-    hi   = summ["exp(coef) upper 95%"]
-    pval = summ["p"]
+#     # 1. one-hot cancer.type  (reference level dropped automatically)
+#     df = pd.get_dummies(df, columns=["cancer.type"], drop_first=True)
+#     cancer_dummies = [c for c in df.columns if c.startswith("cancer.type_")]
 
-    yticks = summ.index.tolist()
-    n      = len(yticks)
+#     # 2. make sure the SNP flag is numeric 0/1
+#     df["SNP_FLAG"] = df[snp_flag].astype(int)
 
-    # ── adaptive figure size ────────────────────────────────────────────
-    fig_w = max(5.0, 0.10 * max(map(len, yticks)) + 4.0)
-    fig_h = 0.6 * n + 1.0
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-
-    # ── loop row-by-row so we can colour exposures vs covariates ───────
-    for y, name in enumerate(yticks):
-        is_exposure = name.startswith(exposure_prefix)
-        color       = "tab:blue" if is_exposure else "grey"
-
-        ax.errorbar(
-            hr[name],
-            y,
-            xerr=[[hr[name] - lo[name]], [hi[name] - hr[name]]],
-            fmt="o",
-            capsize=3,
-            color=color,
-            elinewidth=1.2,
-        )
-
-        if annotate and is_exposure:
-            stars = ""
-            if star:
-                pv = pval[name]
-                if   pv < 0.001: stars = " ***"
-                elif pv < 0.01:  stars = " **"
-                elif pv < 0.05:  stars = " *"
-
-            ax.annotate(
-                f"{hr[name]:.2f}  (p={pval[name]:.3g}){stars}",
-                xy=(float(hr[name]), y),
-                xytext=(4, 5),
-                textcoords="offset points",
-                va="center",
-                ha="left",
-                fontsize=8,
-                color=color,
-            )
-        else:
-            stars = ""
-            if star:
-                pv = pval[name]
-                if   pv < 0.001: stars = " ***"
-                elif pv < 0.01:  stars = " **"
-                elif pv < 0.05:  stars = " *"
-
-            ax.annotate(
-                f"{hr[name]:.2f}  (p={pval[name]:.3g}){stars}",
-                xy=(float(hr[name]), y),
-                xytext=(4, 5),
-                textcoords="offset points",
-                va="center",
-                ha="left",
-                fontsize=8,
-                color="black",
-            )
-
-    # ── cosmetics ───────────────────────────────────────────────────────
-    ax.set_xscale("log")
-    ax.axvline(1, ls="--", lw=1.2, color="black")
-    ax.grid(axis="x", ls=":", lw=0.6)
-
-    ax.set_yticks(range(n))
-    ax.set_yticklabels(yticks)
-    ax.invert_yaxis()
-
-    lo_min = lo.min()
-    xmin   = 0.05 if lo_min < 0.05 else lo_min * 0.8
-    ax.set_xlim(xmin, hi.max()*1.3)
+#     THRESH_N_SNP_POS = 3
     
-    # xmin = max(0.3, lo.min() * 0.8)
-    # xmax = hi.max() * 1.3
-    # ax.set_xlim(xmin, xmax)
+#     # 3. interaction columns
+#     inter_cols = []
+#     for cd in cancer_dummies:
+#         n_pos = (df[cd] & df["SNP_FLAG"]).sum()    # #samples in that cancer + SNP=1
+#         if n_pos < THRESH_N_SNP_POS:
+#             print(f"  · skip {cd}:SNP_FLAG  (only {n_pos} SNP-positive)")
+#             continue
+#         cname = f"{cd}:SNP_FLAG"
+#         prod  = df[cd] * df["SNP_FLAG"]
+#         if prod.var() == 0:            # drop zero-variance terms
+#             continue
+#         df[cname] = prod
+#         inter_cols.append(cname)
 
-    ax.set_xlabel("Hazard ratio (log scale)")
-    ax.set_title(title)
-    fig.tight_layout()
+#     # 4. final design matrix
+#     design = (
+#         ["SNP_FLAG"]
+#         + cancer_dummies
+#         + inter_cols
+#         + base_covars           # continuous or to-be-dummied later
+#     )
+#     X = pd.get_dummies(df[design], drop_first=True)
 
-    fig.savefig(out_stem.with_suffix(FIG_EXT), bbox_inches="tight")
+#     # 5. fit
+#     cph = CoxPHFitter(penalizer=penalizer)
+#     try:
+#         cph.fit(
+#             pd.concat([df[[t, e]], X], axis=1),
+#             duration_col=t, event_col=e, robust=True
+#         )
+#     except Exception as err:
+#         print(f"[WARN] interaction model failed: {err}")
+#         return None
+
+#     cph.summary.to_csv(out_tsv, sep="\t")
+#     return cph
+def tidy_summary(cph: CoxPHFitter) -> pd.DataFrame:
+    """Return a tidy Cox summary with consistent column names."""
+    summ = cph.summary.reset_index().rename(columns={"index": "term"})
+    keep_cols = {
+        "term": "term",
+        "exp(coef)": "HR",
+        "exp(coef) lower 95%": "HR_lower",
+        "exp(coef) upper 95%": "HR_upper",
+        "p": "p",
+    }
+    return summ[list(keep_cols.keys())].rename(columns=keep_cols)
+
+
+def forest_plot(cph: CoxPHFitter, out_svg: Path, title: str, alpha: float = 0.05,
+                hide_cancer_main: bool = True):
+    import matplotlib.pyplot as plt
+
+    def fmt_p(p):
+        if p is None or np.isnan(p): return "NA"
+        return f"{p:.1e}" if p < 1e-4 else f"{p:.4f}"
+
+    # ---------- tidy + label cleanup ----------
+    summ = tidy_summary(cph).copy()
+
+    # hide main-effect cancer rows; keep interactions
+    if hide_cancer_main:
+        is_cancer_main = summ["term"].str.startswith("cancer_") & ~summ["term"].str.contains(":psi")
+        summ = summ.loc[~is_cancer_main].reset_index(drop=True)
+
+    # readable labels
+    def pretty_term(t: str) -> str:
+        if t == "age":
+            return "Age"
+        if t == "psi":
+            return "ψ"
+        if t.startswith("sex_"):
+            return "Sex: " + t[len("sex_"):]
+        if t.startswith("race_"):
+            return "Race: " + t[len("race_"):]
+        # interaction terms like "cancer_BLCA:psi" or "cancer_TCGA-BLCA:psi"
+        if ":psi" in t and t.startswith("cancer_"):
+            cn = t.split(":")[0].replace("cancer_", "", 1)
+            cn = cn.replace("TCGA-", "")  # drop TCGA- if present
+            return f"ψ × {cn}"
+        return t
+
+    summ["pretty"] = summ["term"].map(pretty_term)
+
+    # stable ordering: Age, ψ, other mains, interactions
+    def term_group(t: str) -> int:
+        if t == "age": return 0
+        if t == "psi": return 1
+        if ":psi" in t: return 3
+        return 2
+    summ = summ.sort_values(by=["term"], key=lambda col: [(term_group(t), t) for t in col])
+    # ---------- vectors for plotting ----------
+    HR      = summ["HR"].astype(float).to_numpy()
+    L       = np.minimum(summ["HR_lower"].astype(float).to_numpy(), HR)
+    U       = np.maximum(summ["HR_upper"].astype(float).to_numpy(), HR)
+    xerr    = np.vstack([HR - L, U - HR])
+    pvals   = summ["p"].astype(float).to_numpy()
+    labels  = summ["pretty"].astype(str).tolist()
+    raw     = summ["term"].astype(str).tolist()
+    sig     = pvals < alpha
+
+    n = len(labels)
+    y = np.arange(n)[::-1]
+
+    # ---------- figure layout: left = forest, right = text columns ----------
+    # Reserve a slim right column (28% width) for text so the plot doesn't expand x-limits.
+    fig_h = max(4.0, 0.42 * n)
+    # width adapts a little to label length, but stays compact
+    max_lab = max(len(s) for s in labels) if labels else 10
+    fig_w = min(12.0, max(8.5, 0.12 * max_lab + 6.5))
+
+    fig = plt.figure(figsize=(fig_w, fig_h))
+    # axes: [left, bottom, width, height] in figure fraction
+    ax = fig.add_axes([0.10, 0.12, 0.60, 0.78])    # forest
+    ax_txt = fig.add_axes([0.72, 0.12, 0.26, 0.78])  # text columns
+
+    # ---------- alternating row bands ----------
+    for i in range(n):
+        if i % 2 == 1:
+            ax.axhspan(y[i] - 0.5, y[i] + 0.5, color=(0, 0, 0, 0.03), zorder=0)
+
+    # ---------- forest points + CIs ----------
+    colors = np.where(sig, "C3", "C0")
+    for i in range(n):
+        ax.errorbar(HR[i], y[i], xerr=xerr[:, i:i+1], fmt='o', ms=5.5,
+                    capsize=3, lw=1.3, color=colors[i], ecolor=colors[i], zorder=3)
+
+    ax.axvline(1.0, linestyle="--", linewidth=1, color="gray", zorder=1)
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels)
+    ax.set_xscale("log")
+    # tidy x ticks on log scale
+    try:
+        # nice ticks around the range
+        xmin = np.nanmin(L[L > 0]) if np.any(L > 0) else 0.2
+        xmax = np.nanmax(U[np.isfinite(U)]) if np.any(np.isfinite(U)) else 5.0
+        # gentle padding
+        lo = max(0.2, xmin / 1.3)
+        hi = min(20.0, xmax * 1.3)
+        ax.set_xlim(lo, hi)
+    except Exception:
+        pass
+
+    # subtle vertical grid for readability
+    ax.grid(axis="x", which="both", linestyle=":", linewidth=0.8, alpha=0.35)
+    ax.tick_params(axis='y', length=0)  # cleaner left axis
+
+    # Title
+    ax.set_title(title, loc="left")
+
+    # ---------- right column: HR [95% CI] and p-value ----------
+    ax_txt.set_axis_off()
+    # match y scale to the forest axis so rows align
+    ax_txt.set_ylim(ax.get_ylim())
+
+    # column headers
+    ax_txt.text(0.00, 1.02, "HR [95% CI]", transform=ax_txt.transAxes,
+                ha="left", va="bottom", fontsize=11, fontweight="bold")
+    ax_txt.text(0.68, 1.02, "p", transform=ax_txt.transAxes,
+                ha="left", va="bottom", fontsize=11, fontweight="bold")
+
+    # row texts
+    for i in range(n):
+        hr_txt = f"{HR[i]:.2f} [{L[i]:.2f}, {U[i]:.2f}]"
+        p_txt  = fmt_p(pvals[i])
+        ax_txt.text(0.00, y[i], hr_txt, ha="left", va="center",
+                    fontsize=10, color=("C3" if sig[i] else "black"))
+        ax_txt.text(0.68, y[i], p_txt, ha="left", va="center",
+                    fontsize=10, color=("C3" if sig[i] else "black"))
+
+    # tiny legend proxy (optional; comment out if you don't want it)
+    from matplotlib.lines import Line2D
+    leg_handles = [
+        Line2D([0], [0], marker='o', color='C0', label=f'p ≥ {alpha}', markersize=6, linestyle='None'),
+        Line2D([0], [0], marker='o', color='C3', label=f'p < {alpha}',  markersize=6, linestyle='None'),
+    ]
+    ax.legend(handles=leg_handles, loc="lower left", frameon=False)
+
+    # save SVG (text preserved)
+    plt.tight_layout(rect=[0.00, 0.00, 1.00, 0.98])
+    fig.savefig(out_svg.with_suffix(".svg"), **SAVEFIG_KW)
     plt.close(fig)
+
+# def forest_plot(
+#     cox_tsv: Path,
+#     out_stem: Path,
+#     title: str,
+#     annotate: bool = True,
+#     star: bool = True,
+#     exposure_prefix: tuple[str, ...] = ("group", "PAT_LABEL", "SNP_PATTERN", "Any_SNP"),
+# ):
+#     """
+#     Draw a forest plot from a lifelines Cox summary.
+
+#     • Blue rows = exposures of interest   (label starts with exposure_prefix)
+#     • Grey rows = adjustment covariates   (e.g. gender, race)
+#     • log-scale x-axis centred on HR = 1
+#     • Optional annotation: “HR  (p=…)” + significance stars
+#     """
+#     import matplotlib.pyplot as plt
+#     import numpy as np
+#     import pandas as pd
+#     cox_tsv = Path(cox_tsv)
+#     if not cox_tsv.exists():
+#         print(f"[forest_plot] {cox_tsv} not found – skipping.")
+#         return
+
+
+#     summ = pd.read_csv(cox_tsv, sep="\t", index_col=0)
+#     if summ.empty:
+#         return
+# ####
+#     # idx = summ.index.astype(str)
+
+#     # has_interactions = idx.str.contains(":").any()
+#     # if has_interactions:
+#     #     is_cancer_term   = idx.str.contains("cancer.type")
+#     #     is_interaction   = idx.str.contains(":")
+
+#     #     # Drop only PURE cancer main effects (no colon)
+#     #     drop_mask = is_cancer_term & ~is_interaction
+
+#     #     summ = summ.loc[~drop_mask]
+# ####
+
+#     # keep order as in table
+#     hr   = summ["exp(coef)"]
+#     lo   = summ["exp(coef) lower 95%"]
+#     hi   = summ["exp(coef) upper 95%"]
+#     pval = summ["p"]
+
+#     yticks = summ.index.tolist()
+#     n      = len(yticks)
+
+#     # ── adaptive figure size ────────────────────────────────────────────
+#     fig_w = max(5.0, 0.10 * max(map(len, yticks)) + 4.0)
+#     fig_h = 0.6 * n + 1.0
+#     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+#     # ── loop row-by-row so we can colour exposures vs covariates ───────
+#     for y, name in enumerate(yticks):
+#         is_exposure = name.startswith(exposure_prefix)
+#         color       = "tab:blue" if is_exposure else "grey"
+
+#         ax.errorbar(
+#             hr[name],
+#             y,
+#             xerr=[[hr[name] - lo[name]], [hi[name] - hr[name]]],
+#             fmt="o",
+#             capsize=3,
+#             color=color,
+#             elinewidth=1.2,
+#         )
+
+#         if annotate and is_exposure:
+#             stars = ""
+#             if star:
+#                 pv = pval[name]
+#                 if   pv < 0.001: stars = " ***"
+#                 elif pv < 0.01:  stars = " **"
+#                 elif pv < 0.05:  stars = " *"
+
+#             ax.annotate(
+#                 f"{hr[name]:.2f}  (p={pval[name]:.3g}){stars}",
+#                 xy=(float(hr[name]), y),
+#                 xytext=(4, 5),
+#                 textcoords="offset points",
+#                 va="center",
+#                 ha="left",
+#                 fontsize=8,
+#                 color=color,
+#             )
+#         else:
+#             stars = ""
+#             if star:
+#                 pv = pval[name]
+#                 if   pv < 0.001: stars = " ***"
+#                 elif pv < 0.01:  stars = " **"
+#                 elif pv < 0.05:  stars = " *"
+
+#             ax.annotate(
+#                 f"{hr[name]:.2f}  (p={pval[name]:.3g}){stars}",
+#                 xy=(float(hr[name]), y),
+#                 xytext=(4, 5),
+#                 textcoords="offset points",
+#                 va="center",
+#                 ha="left",
+#                 fontsize=8,
+#                 color="black",
+#             )
+
+#     # ── cosmetics ───────────────────────────────────────────────────────
+#     ax.set_xscale("log")
+#     ax.axvline(1, ls="--", lw=1.2, color="black")
+#     ax.grid(axis="x", ls=":", lw=0.6)
+
+#     ax.set_yticks(range(n))
+#     ax.set_yticklabels(yticks)
+#     ax.invert_yaxis()
+
+#     lo_min = lo.min()
+#     xmin   = 0.05 if lo_min < 0.05 else lo_min * 0.8
+#     ax.set_xlim(xmin, hi.max()*1.3)
+    
+#     # xmin = max(0.3, lo.min() * 0.8)
+#     # xmax = hi.max() * 1.3
+#     # ax.set_xlim(xmin, xmax)
+
+#     ax.set_xlabel("Hazard ratio (log scale)")
+#     ax.set_title(title)
+#     fig.tight_layout()
+
+#     fig.savefig(out_stem.with_suffix(FIG_EXT), bbox_inches="tight")
+#     plt.close(fig)
 
 def pattern_label(bits: str, snp_cols: list[str]) -> str:
     """
@@ -373,6 +676,27 @@ def informative_strata_mask(df: pd.DataFrame, snp_col: str) -> pd.Series:
     has_true  = by_cancer.transform("any")
     has_false = (~by_cancer.transform("all"))
     return has_true & has_false
+
+# snp_cols: list of 0/1 SNP columns, e.g. ["chr5_1295135_G>A", ...]
+# df: full pan-cancer dataframe
+
+def make_pattern_bits(df, snp_cols):
+    """Return a Series of bitstrings like '0101' for each row."""
+    return (
+        df[snp_cols]
+        .fillna(0)
+        .astype(int)
+        .astype(str)
+        .agg("".join, axis=1)
+    )
+
+def pattern_label(bits, snp_cols):
+    """Turn '0101' into 'SNP2 + SNP4', or 'None' if all zeros."""
+    if set(bits) == {"0"}:
+        return "None"
+    keep = [name for bit, name in zip(bits, snp_cols) if bit == "1"]
+    return " + ".join(keep)
+
     
 # ───────────────────────── main pipeline ───────────────────────────────
 def main():
@@ -388,6 +712,7 @@ def main():
     df["race"] = df["race"].replace({"Asian":"Other", "Black":"Other", "is_missing":"Other"})
     snp_cols = [c for c in df.columns if "chr5" in c.lower()]
     snp_cols = [c for c in snp_cols if snps[c].sum() > 10]
+    # snp_cols = ["chr5_1295135_G>A"]
     # print(snp_cols)
     print(f"Found {len(snp_cols)} SNP flag columns:", ", ".join(snp_cols))
 
@@ -548,8 +873,11 @@ def main():
 
             (snp_dir/"_cindex_pan.txt").write_text(f"{cidx:.3f}\n")
 
-            forest_plot(snp_dir/"cox_pan.tsv", snp_dir/"forest_pan",
-                        f"{snp} • adjusted Cox (pan)")
+            # forest_plot(snp_dir/"cox_pan.tsv", snp_dir/"forest_pan",
+            
+            #             f"{snp} • adjusted Cox (pan)")
+            if cph is not None:
+                forest_plot(cph, snp_dir/"forest_pan", f"{snp} • adjusted Cox (pan)")
 
                         # === Extra figs (pan-cancer) ===
             if cph is not None:
@@ -631,17 +959,24 @@ def main():
             print(snp)
             print(ph_test.summary)
             ph_test.summary.to_csv(snp_dir / "ph_test.tsv", sep="\t")
+            # cph_inter = cox_cancer_interaction(
+            #     sub,                    # the same subset you already built
+            #     t, e,
+            #     snp_flag=snp,           # the original boolean column
+            #     base_covars=covars_init,
+            #     out_tsv=snp_dir / "cox_inter.tsv",
+            # )
             cph_inter = cox_cancer_interaction(
-                sub,                    # the same subset you already built
+                sub,                    # same subset
                 t, e,
-                snp_flag=snp,           # the original boolean column
+                group_col="group",      # use the same group as simple model
                 base_covars=covars_init,
                 out_tsv=snp_dir / "cox_inter.tsv",
             )
             
             if cph_inter is not None:
                 forest_plot(
-                    snp_dir / "cox_inter.tsv",
+                    cph_inter,
                     snp_dir / "forest_inter",
                     f"{snp} • cancer covariate + SNP×cancer interaction",
                 )
@@ -658,11 +993,13 @@ def main():
 
                 covars_cancer_specific = covars_init
                 cidx, cph   = cox_summary(d, t, e, "group", covars_cancer_specific,
-                                     strata=None, 
+                                     strata=None,
                                      out_tsv=cdir/"cox.tsv")
                 (cdir/"_cindex.txt").write_text(f"{cidx:.3f}\n")
-                forest_plot(cdir/"cox.tsv", cdir/"forest",
-                            f"{snp} • {ctype} • Cox")
+                # forest_plot(cdir/"cox.tsv", cdir/"forest",
+                #             f"{snp} • {ctype} • Cox")
+                if cph is not None:
+                    forest_plot(cph, cdir/"forest", f"{snp} • {ctype} • Cox")
 
                 
 
@@ -683,8 +1020,10 @@ def main():
                              strata= strata, 
                              out_tsv=out_dir/"cox.tsv")
         (out_dir/"_cindex.txt").write_text(f"{cidx:.3f}\n")
-        forest_plot(out_dir/"cox.tsv", out_dir/"forest",
-                    f"Any SNP • {tag} • Cox")
+        # forest_plot(out_dir/"cox.tsv", out_dir/"forest",
+        #             f"Any SNP • {tag} • Cox")
+        if cph is not None:
+            forest_plot(cph, out_dir/"forest", f"Any SNP • {tag} • Cox")
 
     indicator_analysis(df.copy(), "pan-cancer", any_dir)
     for c, d in df.groupby("cancer.type", observed=True):
@@ -700,7 +1039,8 @@ def main():
     counts.to_csv(pat_dir / "pattern_counts.tsv", sep="\t")
     
     zero = "0" * len(snp_cols)
-    keep = counts[(counts >= MIN_PER_GROUP) | (counts.index == zero)].index
+    # keep = counts[(counts >= MIN_PER_GROUP) | (counts.index == zero)].index
+    keep = counts[(counts >= 10) | (counts.index == zero)].index
     dpat = df[df["SNP_PATTERN"].isin(keep)].copy()
     
     # ── NEW: rename levels to readable labels ───────────────────────────
@@ -728,11 +1068,50 @@ def main():
             out_tsv=pat_dir / "cox.tsv"
         )
         (pat_dir / "_cindex.txt").write_text(f"{cidx:.3f}\n")
-        forest_plot(
-            pat_dir / "cox.tsv",
-            pat_dir / "forest",
-            "SNP combo • pan-cancer • Cox"
-        )
+        # forest_plot(
+        #     pat_dir / "cox.tsv",
+        #     pat_dir / "forest",
+        #     "SNP combo • pan-cancer • Cox"
+        # )
+        if cph is not None:
+            forest_plot(cph, pat_dir / "forest", "SNP combo • pan-cancer • Cox")
+        # Individual combo vs None KM plots
+        combo_dir = pat_dir / "combo_vs_none"
+        safe_mkdir(combo_dir)
+
+        # Keep readable summary of each comparison
+        cmp_rows = []
+
+        for combo in (c for c in dpat["PAT_LABEL"].cat.categories if c != "None"):
+            sub = dpat[dpat["PAT_LABEL"].isin(["None", combo])].copy()
+            counts = sub["PAT_LABEL"].value_counts()
+            # if counts.min() < MIN_PER_GROUP:
+            #     print(f"  · skip {combo} vs None (counts: {counts.to_dict()})")
+            #     continue
+
+            sub["group"] = np.where(sub["PAT_LABEL"] == combo, str(combo), "None")
+
+            safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(combo))
+            out_stem = combo_dir / f"{safe_name}_vs_None"
+            title = f"{combo} vs None (pan-cancer)"
+
+            km_plot(sub, t, e, "group", title, out_stem)
+            stat, p = logrank_p(sub, t, e, "group")
+            cmp_rows.append({
+                "combo": combo,
+                "n_combo": int(counts.get(combo, 0)),
+                "n_none": int(counts.get("None", 0)),
+                "logrank_stat": stat,
+                "logrank_p": p,
+            })
+
+        if cmp_rows:
+            pd.DataFrame(cmp_rows).to_csv(
+                combo_dir / "combo_vs_none_logrank.tsv",
+                sep="\t",
+                index=False,
+            )
+
 
     print("✓ All analyses complete ➜", OUTROOT)
 
