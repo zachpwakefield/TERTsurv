@@ -34,6 +34,7 @@ MIN_PER_GROUP = 5
 MIN_PER_CANCER = 5
 FIG_EXT = ".svg"
 covars_init = ["gender", "race", "age_at_diagnosis"]#, "stage_code"]
+SAVEFIG_KW = {"dpi": 150}
 
 # ─────────────────────────── helpers ───────────────────────────────────
 def safe_mkdir(p: Path): p.mkdir(parents=True, exist_ok=True)
@@ -317,72 +318,14 @@ def cox_cancer_interaction(
     cph.summary.to_csv(out_tsv, sep="\t")
     return cph
 
-
-# def cox_cancer_interaction(
-#     df          : pd.DataFrame,
-#     t           : str,
-#     e           : str,
-#     snp_flag    : str,          # column with 0/1
-#     base_covars : list[str],    # the usual gender / race / age …
-#     out_tsv     : Path,
-#     penalizer   : float = 0.05, # a bit more ridge for many dummies
-# ):
-#     """
-#     Cancer type is treated like any other categorical covariate and every
-#     dummy is interacted with the SNP flag.
-
-#     Returns the fitted CoxPHFitter (or None if convergence fails).
-#     """
-#     df = df.copy()
-
-#     # 1. one-hot cancer.type  (reference level dropped automatically)
-#     df = pd.get_dummies(df, columns=["cancer.type"], drop_first=True)
-#     cancer_dummies = [c for c in df.columns if c.startswith("cancer.type_")]
-
-#     # 2. make sure the SNP flag is numeric 0/1
-#     df["SNP_FLAG"] = df[snp_flag].astype(int)
-
-#     THRESH_N_SNP_POS = 3
-    
-#     # 3. interaction columns
-#     inter_cols = []
-#     for cd in cancer_dummies:
-#         n_pos = (df[cd] & df["SNP_FLAG"]).sum()    # #samples in that cancer + SNP=1
-#         if n_pos < THRESH_N_SNP_POS:
-#             print(f"  · skip {cd}:SNP_FLAG  (only {n_pos} SNP-positive)")
-#             continue
-#         cname = f"{cd}:SNP_FLAG"
-#         prod  = df[cd] * df["SNP_FLAG"]
-#         if prod.var() == 0:            # drop zero-variance terms
-#             continue
-#         df[cname] = prod
-#         inter_cols.append(cname)
-
-#     # 4. final design matrix
-#     design = (
-#         ["SNP_FLAG"]
-#         + cancer_dummies
-#         + inter_cols
-#         + base_covars           # continuous or to-be-dummied later
-#     )
-#     X = pd.get_dummies(df[design], drop_first=True)
-
-#     # 5. fit
-#     cph = CoxPHFitter(penalizer=penalizer)
-#     try:
-#         cph.fit(
-#             pd.concat([df[[t, e]], X], axis=1),
-#             duration_col=t, event_col=e, robust=True
-#         )
-#     except Exception as err:
-#         print(f"[WARN] interaction model failed: {err}")
-#         return None
-
-#     cph.summary.to_csv(out_tsv, sep="\t")
-#     return cph
 def tidy_summary(cph: CoxPHFitter) -> pd.DataFrame:
     """Return a tidy Cox summary with consistent column names."""
-    summ = cph.summary.reset_index().rename(columns={"index": "term"})
+    summ = cph.summary.reset_index()
+    # lifelines versions may name the reset index column "index" or "covariate"
+    term_col = summ.columns[0]
+    if term_col != "term":
+        summ = summ.rename(columns={term_col: "term"})
+
     keep_cols = {
         "term": "term",
         "exp(coef)": "HR",
@@ -390,11 +333,17 @@ def tidy_summary(cph: CoxPHFitter) -> pd.DataFrame:
         "exp(coef) upper 95%": "HR_upper",
         "p": "p",
     }
+
+    # guard against older lifelines where the p column might be named "p" or "p_value"
+    if "p" not in summ.columns and "p_value" in summ.columns:
+        summ = summ.rename(columns={"p_value": "p"})
+
     return summ[list(keep_cols.keys())].rename(columns=keep_cols)
 
 
 def forest_plot(cph: CoxPHFitter, out_svg: Path, title: str, alpha: float = 0.05,
                 hide_cancer_main: bool = True):
+    import numpy as np
     import matplotlib.pyplot as plt
 
     def fmt_p(p):
@@ -435,6 +384,10 @@ def forest_plot(cph: CoxPHFitter, out_svg: Path, title: str, alpha: float = 0.05
         if ":psi" in t: return 3
         return 2
     summ = summ.sort_values(by=["term"], key=lambda col: [(term_group(t), t) for t in col])
+
+    if summ.empty:
+        return
+
     # ---------- vectors for plotting ----------
     HR      = summ["HR"].astype(float).to_numpy()
     L       = np.minimum(summ["HR_lower"].astype(float).to_numpy(), HR)
@@ -475,6 +428,8 @@ def forest_plot(cph: CoxPHFitter, out_svg: Path, title: str, alpha: float = 0.05
     ax.set_yticks(y)
     ax.set_yticklabels(labels)
     ax.set_xscale("log")
+    ax.set_xlabel("Hazard ratio (log scale)")
+
     # tidy x ticks on log scale
     try:
         # nice ticks around the range
@@ -526,138 +481,6 @@ def forest_plot(cph: CoxPHFitter, out_svg: Path, title: str, alpha: float = 0.05
     plt.tight_layout(rect=[0.00, 0.00, 1.00, 0.98])
     fig.savefig(out_svg.with_suffix(".svg"), **SAVEFIG_KW)
     plt.close(fig)
-
-# def forest_plot(
-#     cox_tsv: Path,
-#     out_stem: Path,
-#     title: str,
-#     annotate: bool = True,
-#     star: bool = True,
-#     exposure_prefix: tuple[str, ...] = ("group", "PAT_LABEL", "SNP_PATTERN", "Any_SNP"),
-# ):
-#     """
-#     Draw a forest plot from a lifelines Cox summary.
-
-#     • Blue rows = exposures of interest   (label starts with exposure_prefix)
-#     • Grey rows = adjustment covariates   (e.g. gender, race)
-#     • log-scale x-axis centred on HR = 1
-#     • Optional annotation: “HR  (p=…)” + significance stars
-#     """
-#     import matplotlib.pyplot as plt
-#     import numpy as np
-#     import pandas as pd
-#     cox_tsv = Path(cox_tsv)
-#     if not cox_tsv.exists():
-#         print(f"[forest_plot] {cox_tsv} not found – skipping.")
-#         return
-
-
-#     summ = pd.read_csv(cox_tsv, sep="\t", index_col=0)
-#     if summ.empty:
-#         return
-# ####
-#     # idx = summ.index.astype(str)
-
-#     # has_interactions = idx.str.contains(":").any()
-#     # if has_interactions:
-#     #     is_cancer_term   = idx.str.contains("cancer.type")
-#     #     is_interaction   = idx.str.contains(":")
-
-#     #     # Drop only PURE cancer main effects (no colon)
-#     #     drop_mask = is_cancer_term & ~is_interaction
-
-#     #     summ = summ.loc[~drop_mask]
-# ####
-
-#     # keep order as in table
-#     hr   = summ["exp(coef)"]
-#     lo   = summ["exp(coef) lower 95%"]
-#     hi   = summ["exp(coef) upper 95%"]
-#     pval = summ["p"]
-
-#     yticks = summ.index.tolist()
-#     n      = len(yticks)
-
-#     # ── adaptive figure size ────────────────────────────────────────────
-#     fig_w = max(5.0, 0.10 * max(map(len, yticks)) + 4.0)
-#     fig_h = 0.6 * n + 1.0
-#     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-
-#     # ── loop row-by-row so we can colour exposures vs covariates ───────
-#     for y, name in enumerate(yticks):
-#         is_exposure = name.startswith(exposure_prefix)
-#         color       = "tab:blue" if is_exposure else "grey"
-
-#         ax.errorbar(
-#             hr[name],
-#             y,
-#             xerr=[[hr[name] - lo[name]], [hi[name] - hr[name]]],
-#             fmt="o",
-#             capsize=3,
-#             color=color,
-#             elinewidth=1.2,
-#         )
-
-#         if annotate and is_exposure:
-#             stars = ""
-#             if star:
-#                 pv = pval[name]
-#                 if   pv < 0.001: stars = " ***"
-#                 elif pv < 0.01:  stars = " **"
-#                 elif pv < 0.05:  stars = " *"
-
-#             ax.annotate(
-#                 f"{hr[name]:.2f}  (p={pval[name]:.3g}){stars}",
-#                 xy=(float(hr[name]), y),
-#                 xytext=(4, 5),
-#                 textcoords="offset points",
-#                 va="center",
-#                 ha="left",
-#                 fontsize=8,
-#                 color=color,
-#             )
-#         else:
-#             stars = ""
-#             if star:
-#                 pv = pval[name]
-#                 if   pv < 0.001: stars = " ***"
-#                 elif pv < 0.01:  stars = " **"
-#                 elif pv < 0.05:  stars = " *"
-
-#             ax.annotate(
-#                 f"{hr[name]:.2f}  (p={pval[name]:.3g}){stars}",
-#                 xy=(float(hr[name]), y),
-#                 xytext=(4, 5),
-#                 textcoords="offset points",
-#                 va="center",
-#                 ha="left",
-#                 fontsize=8,
-#                 color="black",
-#             )
-
-#     # ── cosmetics ───────────────────────────────────────────────────────
-#     ax.set_xscale("log")
-#     ax.axvline(1, ls="--", lw=1.2, color="black")
-#     ax.grid(axis="x", ls=":", lw=0.6)
-
-#     ax.set_yticks(range(n))
-#     ax.set_yticklabels(yticks)
-#     ax.invert_yaxis()
-
-#     lo_min = lo.min()
-#     xmin   = 0.05 if lo_min < 0.05 else lo_min * 0.8
-#     ax.set_xlim(xmin, hi.max()*1.3)
-    
-#     # xmin = max(0.3, lo.min() * 0.8)
-#     # xmax = hi.max() * 1.3
-#     # ax.set_xlim(xmin, xmax)
-
-#     ax.set_xlabel("Hazard ratio (log scale)")
-#     ax.set_title(title)
-#     fig.tight_layout()
-
-#     fig.savefig(out_stem.with_suffix(FIG_EXT), bbox_inches="tight")
-#     plt.close(fig)
 
 def pattern_label(bits: str, snp_cols: list[str]) -> str:
     """
@@ -873,9 +696,6 @@ def main():
 
             (snp_dir/"_cindex_pan.txt").write_text(f"{cidx:.3f}\n")
 
-            # forest_plot(snp_dir/"cox_pan.tsv", snp_dir/"forest_pan",
-            
-            #             f"{snp} • adjusted Cox (pan)")
             if cph is not None:
                 forest_plot(cph, snp_dir/"forest_pan", f"{snp} • adjusted Cox (pan)")
 
@@ -973,7 +793,7 @@ def main():
                 base_covars=covars_init,
                 out_tsv=snp_dir / "cox_inter.tsv",
             )
-            
+
             if cph_inter is not None:
                 forest_plot(
                     cph_inter,
@@ -996,8 +816,6 @@ def main():
                                      strata=None,
                                      out_tsv=cdir/"cox.tsv")
                 (cdir/"_cindex.txt").write_text(f"{cidx:.3f}\n")
-                # forest_plot(cdir/"cox.tsv", cdir/"forest",
-                #             f"{snp} • {ctype} • Cox")
                 if cph is not None:
                     forest_plot(cph, cdir/"forest", f"{snp} • {ctype} • Cox")
 
@@ -1017,11 +835,9 @@ def main():
         covars = covars_init
         strata = "cancer.type" if tag=="pan-cancer" else None
         cidx, cph   = cox_summary(dframe, t, e, "group", covars,
-                             strata= strata, 
+                             strata= strata,
                              out_tsv=out_dir/"cox.tsv")
         (out_dir/"_cindex.txt").write_text(f"{cidx:.3f}\n")
-        # forest_plot(out_dir/"cox.tsv", out_dir/"forest",
-        #             f"Any SNP • {tag} • Cox")
         if cph is not None:
             forest_plot(cph, out_dir/"forest", f"Any SNP • {tag} • Cox")
 
@@ -1050,7 +866,7 @@ def main():
     # Make 'None' the reference level by ordering categories
     cats = sorted(label_map.values(), key=lambda s: (s != "None", s))
     dpat["PAT_LABEL"] = pd.Categorical(dpat["PAT_LABEL"], categories=cats)
-    
+
     if dpat["PAT_LABEL"].nunique() > 1:
         km_plot(dpat, t, e, "PAT_LABEL",
                 "SNP combinations (pan-cancer)", pat_dir / "km")
@@ -1058,7 +874,7 @@ def main():
         pd.DataFrame({"stat": [stat], "p": [p]}).to_csv(
             pat_dir / "logrank.tsv", sep="\t", index=False
         )
-    
+
         covars = covars_init
         cidx, cph = cox_summary(
             dpat, t, e,
@@ -1068,13 +884,9 @@ def main():
             out_tsv=pat_dir / "cox.tsv"
         )
         (pat_dir / "_cindex.txt").write_text(f"{cidx:.3f}\n")
-        # forest_plot(
-        #     pat_dir / "cox.tsv",
-        #     pat_dir / "forest",
-        #     "SNP combo • pan-cancer • Cox"
-        # )
         if cph is not None:
             forest_plot(cph, pat_dir / "forest", "SNP combo • pan-cancer • Cox")
+
         # Individual combo vs None KM plots
         combo_dir = pat_dir / "combo_vs_none"
         safe_mkdir(combo_dir)
@@ -1085,9 +897,9 @@ def main():
         for combo in (c for c in dpat["PAT_LABEL"].cat.categories if c != "None"):
             sub = dpat[dpat["PAT_LABEL"].isin(["None", combo])].copy()
             counts = sub["PAT_LABEL"].value_counts()
-            # if counts.min() < MIN_PER_GROUP:
-            #     print(f"  · skip {combo} vs None (counts: {counts.to_dict()})")
-            #     continue
+            if counts.min() < MIN_PER_GROUP:
+                print(f"  · skip {combo} vs None (counts: {counts.to_dict()})")
+                continue
 
             sub["group"] = np.where(sub["PAT_LABEL"] == combo, str(combo), "None")
 
@@ -1111,7 +923,6 @@ def main():
                 sep="\t",
                 index=False,
             )
-
 
     print("✓ All analyses complete ➜", OUTROOT)
 
