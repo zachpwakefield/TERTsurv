@@ -366,8 +366,13 @@ def forest_plot(cph: CoxPHFitter, out_svg: Path, title: str, alpha: float = 0.05
     # Try to recover the training data + event column for counts (optional)
     if training_df is None:
         training_df = getattr(cph, "_tertsurv_training", None)
-    event_col = getattr(cph, "_tertsurv_event_col", getattr(cph, "event_col", None))
+    if training_df is None:
+        # lifelines keeps the processed design matrix on fitted models
+        training_df = getattr(cph, "_training_data", None)
 
+    event_col = getattr(cph, "_tertsurv_event_col", None)
+    if event_col is None:
+        event_col = getattr(cph, "event_col_", getattr(cph, "event_col", None))
     
     # hide main-effect cancer rows; keep interactions
     if hide_cancer_main:
@@ -479,14 +484,43 @@ def forest_plot(cph: CoxPHFitter, out_svg: Path, title: str, alpha: float = 0.05
     # match y scale to the forest axis so rows align
     ax_txt.set_ylim(ax.get_ylim())
 
-    counts = {}
-    if training_df is not None and event_col is not None and event_col in training_df.columns:
+    counts: dict[str, tuple[int, int] | None] = {}
+    show_counts = training_df is not None and event_col is not None and event_col in (training_df.columns if training_df is not None else [])
+
+    def _match_training_col(term: str) -> str | None:
+        """Best-effort match between summary term and training design column."""
+        if training_df is None:
+            return None
+
+        # exact match
+        if term in training_df.columns:
+            return term
+
+        # lifelines sometimes flips cancer_/cancer.type_ naming or replaces ':' with '_'
+        variants = set()
+        if term.startswith("cancer_"):
+            variants.add(term.replace("cancer_", "cancer.type_", 1))
+        variants.add(term.replace(":", "_"))
+
+        for var in variants:
+            if var in training_df.columns:
+                return var
+
+        # fall back to suffix match (e.g., design col retains original term as suffix)
+        for col in training_df.columns:
+            if col.endswith(term) or col.endswith(term.replace(":", "_")):
+                return col
+        return None
+
+    if show_counts:
         for term in summ["term"]:
             if ":SNP_FLAG" not in term:
                 continue
-            if term not in training_df.columns:
+            col = _match_training_col(term)
+            if col is None:
+                counts[term] = None
                 continue
-            mask = training_df[term] > 0
+            mask = training_df[col] > 0
             n_pos = int(mask.sum())
             ev_pos = int(training_df.loc[mask, event_col].sum())
             counts[term] = (n_pos, ev_pos)
@@ -497,7 +531,7 @@ def forest_plot(cph: CoxPHFitter, out_svg: Path, title: str, alpha: float = 0.05
     ax_txt.text(0.55, 1.02, "p", transform=ax_txt.transAxes,
                 ha="left", va="bottom", fontsize=11, fontweight="bold")
 
-    if counts:
+    if show_counts:
         ax_txt.text(0.80, 1.02, "N / events", transform=ax_txt.transAxes,
                     ha="left", va="bottom", fontsize=11, fontweight="bold")
 
@@ -511,11 +545,15 @@ def forest_plot(cph: CoxPHFitter, out_svg: Path, title: str, alpha: float = 0.05
                     fontsize=10, color=("C3" if sig[i] else "black"))
 
         # Interaction counts (SNP+ samples and events in that subset)
-        if counts:
+        if show_counts:
             ct_txt = ""
             if raw[i] in counts:
-                n_pos, ev_pos = counts[raw[i]]
-                ct_txt = f"{n_pos} / {ev_pos}"
+                val = counts[raw[i]]
+                if val is not None:
+                    n_pos, ev_pos = val
+                    ct_txt = f"{n_pos} / {ev_pos}"
+                else:
+                    ct_txt = "—"
             ax_txt.text(0.80, y[i], ct_txt, ha="left", va="center",
                         fontsize=10, color=("C3" if sig[i] else "black"))
 
