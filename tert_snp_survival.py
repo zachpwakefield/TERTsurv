@@ -30,8 +30,8 @@ OUTROOT   = Path("/projectnb/evolution/zwakefield/tcga/TERTsnp_yunwei")
 # SNP_XLSX  = OUTROOT / "TCGA_TERT_SNP_IDs.xlsx"
 SNP_XLSX  = OUTROOT / "tert_data_12_8.tsv"
 CLIN_CSV  = "/projectnb2/evolution/zwakefield/tcga/sir_analysis/harmonized/clinical_harmonized_numeric.csv"
-MIN_PER_GROUP = 5
-MIN_PER_CANCER = 5
+MIN_PER_GROUP = 8
+MIN_PER_CANCER = 8
 FIG_EXT = ".svg"
 covars_init = ["gender", "race", "age_at_diagnosis"]#, "stage_code"]
 SAVEFIG_KW = {"dpi": 150}
@@ -208,6 +208,10 @@ def cox_summary(df, t_col, e_col, exposure, adjust, *, strata=None, out_tsv):
         print("[cox_summary] ConvergenceError:", err)
         return np.nan, None
 
+    # Keep training data/event column around for plotting annotations
+    cph._tertsurv_training = df_fit.copy()
+    cph._tertsurv_event_col = e_col
+
     cph.summary.to_csv(out_tsv, sep="\t")
     return cph.concordance_index_, cph
 
@@ -304,9 +308,11 @@ def cox_cancer_interaction(
 
     # 5. Fit Cox model
     cph = CoxPHFitter(penalizer=penalizer)
+
+    df_fit = pd.concat([df[[t, e]], X], axis=1)
     try:
         cph.fit(
-            pd.concat([df[[t, e]], X], axis=1),
+            df_fit,
             duration_col=t,
             event_col=e,
             robust=True,
@@ -315,6 +321,9 @@ def cox_cancer_interaction(
         print(f"[WARN] interaction model failed: {err}")
         return None
 
+    cph._tertsurv_training = df_fit.copy()
+    cph._tertsurv_event_col = e
+    
     cph.summary.to_csv(out_tsv, sep="\t")
     return cph
 
@@ -342,7 +351,8 @@ def tidy_summary(cph: CoxPHFitter) -> pd.DataFrame:
 
 
 def forest_plot(cph: CoxPHFitter, out_svg: Path, title: str, alpha: float = 0.05,
-                hide_cancer_main: bool = True):
+                hide_cancer_main: bool = True,
+                training_df: pd.DataFrame | None = None):
     import numpy as np
     import matplotlib.pyplot as plt
 
@@ -353,9 +363,15 @@ def forest_plot(cph: CoxPHFitter, out_svg: Path, title: str, alpha: float = 0.05
     # ---------- tidy + label cleanup ----------
     summ = tidy_summary(cph).copy()
 
+    # Try to recover the training data + event column for counts (optional)
+    if training_df is None:
+        training_df = getattr(cph, "_tertsurv_training", None)
+    event_col = getattr(cph, "_tertsurv_event_col", getattr(cph, "event_col", None))
+
+    
     # hide main-effect cancer rows; keep interactions
     if hide_cancer_main:
-        is_cancer_main = summ["term"].str.startswith("cancer_") & ~summ["term"].str.contains(":psi")
+        is_cancer_main = summ["term"].str.startswith("cancer") & ~summ["term"].str.contains(":group")
         summ = summ.loc[~is_cancer_main].reset_index(drop=True)
 
     # readable labels
@@ -406,12 +422,21 @@ def forest_plot(cph: CoxPHFitter, out_svg: Path, title: str, alpha: float = 0.05
     fig_h = max(4.0, 0.42 * n)
     # width adapts a little to label length, but stays compact
     max_lab = max(len(s) for s in labels) if labels else 10
-    fig_w = min(12.0, max(8.5, 0.12 * max_lab + 6.5))
+    # fig_w = min(12.0, max(8.5, 0.12 * max_lab + 6.5))
+    fig_w = min(13.0, max(9.0, 0.12 * max_lab + 7.5))
 
     fig = plt.figure(figsize=(fig_w, fig_h))
     # axes: [left, bottom, width, height] in figure fraction
-    ax = fig.add_axes([0.10, 0.12, 0.60, 0.78])    # forest
-    ax_txt = fig.add_axes([0.72, 0.12, 0.26, 0.78])  # text columns
+    # ax = fig.add_axes([0.10, 0.12, 0.60, 0.78])    # forest
+    # ax_txt = fig.add_axes([0.72, 0.12, 0.26, 0.78])  # text columns
+
+    gs = fig.add_gridspec(
+        nrows=1, ncols=2,
+        width_ratios=[2.2, 1.0],
+        left=0.08, right=0.98, bottom=0.12, top=0.92, wspace=0.02,
+    )
+    ax = fig.add_subplot(gs[0, 0])
+    ax_txt = fig.add_subplot(gs[0, 1])
 
     # ---------- alternating row bands ----------
     for i in range(n):
@@ -454,11 +479,27 @@ def forest_plot(cph: CoxPHFitter, out_svg: Path, title: str, alpha: float = 0.05
     # match y scale to the forest axis so rows align
     ax_txt.set_ylim(ax.get_ylim())
 
+    counts = {}
+    if training_df is not None and event_col is not None and event_col in training_df.columns:
+        for term in summ["term"]:
+            if ":SNP_FLAG" not in term:
+                continue
+            if term not in training_df.columns:
+                continue
+            mask = training_df[term] > 0
+            n_pos = int(mask.sum())
+            ev_pos = int(training_df.loc[mask, event_col].sum())
+            counts[term] = (n_pos, ev_pos)
+
     # column headers
     ax_txt.text(0.00, 1.02, "HR [95% CI]", transform=ax_txt.transAxes,
                 ha="left", va="bottom", fontsize=11, fontweight="bold")
-    ax_txt.text(0.68, 1.02, "p", transform=ax_txt.transAxes,
+    ax_txt.text(0.55, 1.02, "p", transform=ax_txt.transAxes,
                 ha="left", va="bottom", fontsize=11, fontweight="bold")
+
+    if counts:
+        ax_txt.text(0.80, 1.02, "N / events", transform=ax_txt.transAxes,
+                    ha="left", va="bottom", fontsize=11, fontweight="bold")
 
     # row texts
     for i in range(n):
@@ -466,8 +507,18 @@ def forest_plot(cph: CoxPHFitter, out_svg: Path, title: str, alpha: float = 0.05
         p_txt  = fmt_p(pvals[i])
         ax_txt.text(0.00, y[i], hr_txt, ha="left", va="center",
                     fontsize=10, color=("C3" if sig[i] else "black"))
-        ax_txt.text(0.68, y[i], p_txt, ha="left", va="center",
+        ax_txt.text(0.55, y[i], p_txt, ha="left", va="center",
                     fontsize=10, color=("C3" if sig[i] else "black"))
+
+        # Interaction counts (SNP+ samples and events in that subset)
+        if counts:
+            ct_txt = ""
+            if raw[i] in counts:
+                n_pos, ev_pos = counts[raw[i]]
+                ct_txt = f"{n_pos} / {ev_pos}"
+            ax_txt.text(0.80, y[i], ct_txt, ha="left", va="center",
+                        fontsize=10, color=("C3" if sig[i] else "black"))
+
 
     # tiny legend proxy (optional; comment out if you don't want it)
     from matplotlib.lines import Line2D
@@ -478,8 +529,9 @@ def forest_plot(cph: CoxPHFitter, out_svg: Path, title: str, alpha: float = 0.05
     ax.legend(handles=leg_handles, loc="lower left", frameon=False)
 
     # save SVG (text preserved)
-    plt.tight_layout(rect=[0.00, 0.00, 1.00, 0.98])
-    fig.savefig(out_svg.with_suffix(".svg"), **SAVEFIG_KW)
+    fig.savefig(out_svg.with_suffix(".svg"), bbox_inches="tight", pad_inches=0.1, **SAVEFIG_KW)
+    # plt.tight_layout(rect=[0.00, 0.00, 1.00, 0.98])
+    # fig.savefig(out_svg.with_suffix(".svg"), **SAVEFIG_KW)
     plt.close(fig)
 
 def pattern_label(bits: str, snp_cols: list[str]) -> str:
