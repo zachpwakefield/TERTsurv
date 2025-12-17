@@ -1,3 +1,185 @@
+import pandas as pd
+from lifelines import CoxPHFitter
+from lifelines.statistics import proportional_hazard_test
+%pip install statsmodels
+from statsmodels.stats.multitest import multipletests
+import numpy as np
+
+clin = pd.read_csv("/projectnb2/evolution/zwakefield/tcga/sir_analysis/harmonized/clinical_harmonized_numeric.csv")
+snps = pd.read_csv("/projectnb/evolution/zwakefield/tcga/TERTsnp_yunwei/tert_data_12_8.tsv", sep = '\t')
+
+import pandas as pd
+p = "/projectnb/evolution/zwakefield/tcga/TERTsnp_yunwei/tert_data.csv"
+tert_tcga = pd.read_csv(p)
+print(tert_tcga.shape)
+tert_tcga.columns = ["V1"] + [c.replace(".", "-") for c in tert_tcga.columns[1:]]
+tert_tcga.columns = tert_tcga.columns.str.replace(r"^X", "", regex=True)
+AS_one_gene = tert_tcga.iloc[:, :-1]
+clin_ids = (
+    clin["File.ID"]
+    .astype("string")
+    .str.strip()
+)
+
+id_col = AS_one_gene.columns[0]
+as_cols = AS_one_gene.columns.astype("string").str.strip()
+
+# 2) keep only overlapping sample columns
+sample_cols = [c for c in as_cols[1:] if c in set(clin_ids)]
+AS_keep = AS_one_gene.loc[:, [id_col] + sample_cols].copy()
+print(AS_keep.shape)
+
+# 3) (optional) reorder sample columns to match clin order
+ordered_samples = [s for s in clin_ids if s in sample_cols]
+AS_aligned = AS_keep.loc[:, [id_col] + ordered_samples].copy()
+
+AS_aligned = AS_aligned.rename(columns={AS_aligned.columns[0]: "id_new"})
+
+import re
+import pandas as pd
+
+# --- config: tweak only if your clinical names differ ---
+CLIN_SAMPLE = "File.ID"
+
+# ---------- helpers ----------
+EVENT_TYPES = ("AFE","ALE","SE","RI","MXE","A5SS","A3SS","CO","CE")  # extend if needed
+
+def parse_coords(ev: str) -> str:
+    """Return genomic coordinates-ish part of the event string."""
+    if not isinstance(ev, str):
+        return str(ev)
+    # many of your ids look like 'ENSG...#chrX:...'; take the part after '#'
+    if "#" in ev:
+        return ev.split("#", 1)[1]
+    # fallback: strip gene version if present 'ENSG... .xx'
+    return re.sub(r"^ENSG\d+(?:\.\d+)?[:#]?", "", ev)
+
+def parse_class(ev: str) -> str:
+    """Best-effort grab an event class token if present (AFE/ALE/SE/RI/...)."""
+    if not isinstance(ev, str):
+        return "NA"
+    m = re.search(r"\b(" + "|".join(EVENT_TYPES) + r")\b", ev)
+    return m.group(1) if m else "NA"
+
+# ---------- reshape, join, and build ids ----------
+def as_long_joined(AS_aligned: pd.DataFrame, clin: pd.DataFrame) -> pd.DataFrame:
+    # detect event id source
+    if "id_new" in AS_aligned.columns:
+        wide = AS_aligned.set_index("id_new")
+    else:
+        wide = AS_aligned.copy()
+        # if the index are integers 0,1,2 but you *do* have true ids somewhere else,
+        # replace here; otherwise we'll use these as-is.
+        wide.index.name = "id_new"
+
+    # melt to long: (event_id, File.ID, psi)
+    AS_long = (
+        wide.reset_index()
+            .melt(id_vars=["id_new"], var_name=CLIN_SAMPLE, value_name="psi")
+            .dropna(subset=["psi"])
+    )
+
+    # parse coords & class from the original id string
+    AS_long["coords"] = AS_long["id_new"].astype(str).map(parse_coords)
+    AS_long["class"]  = AS_long["id_new"].astype(str).map(parse_class)
+
+    # make the **new** id = locations + class
+    # AS_long["id_new"] = AS_long["coords"] + "|" + AS_long["class"]
+
+    # join to clinical
+    keep_cols = [CLIN_SAMPLE, "OS.time", "OS.event", "Project.ID", "gender_code", "age_at_diagnosis", "race"]
+    keep_cols = [c for c in keep_cols if c in clin.columns]
+    joined = AS_long.merge(clin[keep_cols], on=CLIN_SAMPLE, how="inner")
+
+    # tidy order
+    cols = ["id_new", "coords", "class", CLIN_SAMPLE, "psi"] + [c for c in keep_cols if c != CLIN_SAMPLE]
+    cols = [c for c in cols if c in joined.columns]
+
+    
+
+    return joined.loc[:, cols]
+
+# ---- run it ----
+LONG = as_long_joined(AS_aligned, clin)
+LONG["race"] = LONG["race"].replace({"Asian":"Other", "Black":"Other", "is_missing":"Other"})
+
+from pathlib import Path
+
+out_dir = Path("")
+out_dir.mkdir(parents=True, exist_ok=True)
+
+# Parquet (fast, preserves types) — recommended
+LONG.to_parquet(out_dir / "AS_long_joined.parquet", index=False)
+
+# Also a CSV for eyeballing
+LONG.to_csv(out_dir / "AS_long_joined.csv", index=False)
+
+import pandas as pd
+from lifelines import CoxPHFitter
+from lifelines.statistics import proportional_hazard_test
+from statsmodels.stats.multitest import multipletests
+import numpy as np
+long_df_use = pd.read_csv('/projectnb2/evolution/zwakefield/tcga/TERTsnp_yunwei/AS_long_joined.csv')
+import pandas as pd, numpy as np
+
+# assuming df has id_new, Project.ID, psi
+def summarize_psi(df):
+    stats = []
+    for ev, sub in df.groupby("id_new", observed=True):
+        nonzero = sub.loc[sub["psi"] > 0, "psi"]
+        cancers = sub.loc[sub["psi"] > 0, "Project.ID"].unique().tolist()
+        stats.append({
+            "id_new": ev,
+            "n_total": len(sub),
+            "n_nonzero": len(nonzero),
+            "frac_nonzero": len(nonzero) / len(sub) if len(sub) else np.nan,
+            "psi_mean_nonzero": nonzero.mean() if len(nonzero) else np.nan,
+            "psi_median_nonzero": nonzero.median() if len(nonzero) else np.nan,
+            "psi_max": sub["psi"].max(),
+            "psi_min": sub["psi"].min(),
+            "n_cancers_nonzero": len(cancers),
+            "cancers_nonzero": ", ".join(sorted(cancers)),
+        })
+    return pd.DataFrame(stats)
+
+    import pandas as pd
+
+# Assume your dataframe is called LONG and has columns: id_new, Project.ID, psi
+df = LONG.copy()
+
+# --- Step 1: ensure psi is numeric ---
+df["psi"] = pd.to_numeric(df["psi"], errors="coerce").fillna(0)
+
+# --- Step 2: count nonzero psi per (id_new, Project.ID) ---
+counts = (
+    df.groupby(["id_new", "Project.ID"], observed=True)["psi"]
+      .apply(lambda x: (x > 0).sum())
+      .reset_index(name="nonzero_count")
+)
+
+# --- Step 3: mark ids that have ≥5 nonzero psi in ANY cancer type ---
+valid_ids = (
+    counts.loc[counts["nonzero_count"] >= 10, "id_new"]
+    .drop_duplicates()
+)
+
+# --- Step 4: keep only those rows ---
+df_filtered = df[df["id_new"].isin(valid_ids)].copy()
+
+print(f"Kept {df_filtered['id_new'].nunique()} ids (out of {df['id_new'].nunique()})")
+print(f"Remaining rows: {len(df_filtered):,}")
+
+# Optional sanity check: how many cancer types per id_new survived
+summary = (
+    counts[counts["id_new"].isin(valid_ids)]
+    .groupby("id_new")["Project.ID"].nunique()
+    .reset_index(name="num_cancers_with_≥5_nonzero")
+)
+print(summary.head())
+
+LONG = df_filtered
+psi_summary = summarize_psi(LONG)
+
 # surv_event_cox_km.py
 # Requires: pandas, numpy, matplotlib, lifelines
 from __future__ import annotations
@@ -863,4 +1045,21 @@ def main():
 
     process(df, Path(args.outdir))
 
+
+from pathlib import Path
+from lifelines.statistics import logrank_test
+import matplotlib as mpl
+mpl.rcParams["svg.fonttype"] = "none"   # keep text editable in SVGs
+
+IMAGE_EXT = ".svg"
+SAVEFIG_KW = dict(format="svg", bbox_inches="tight", pad_inches=0.3)
+
+def savefig_svg(fig, out_path: Path):
+    out_path = out_path.with_suffix(IMAGE_EXT)
+    fig.savefig(out_path, **SAVEFIG_KW)
+    plt.close(fig)
+
+
+OUTDIR = Path("/projectnb/evolution/zwakefield/tcga/TERTsnp_yunwei/output/")
+process(LONG, OUTDIR)
 
